@@ -1,0 +1,227 @@
+'use strict';
+var AWS = require('aws-sdk');
+
+AWS.config.update({region: 'us-east-1'});
+
+AWS.config.apiVersions = {
+  dynamodb: '2012-08-10',
+  // other service API versions
+};
+
+module.exports.intents = function() {
+
+try{
+
+  var ses = new AWS.SES({apiVersion: '2010-12-01'});
+  var dynamodb = new AWS.DynamoDB();
+
+  var d = new Date();
+
+/*  var minutes = d.getMinutes() + 30;
+
+  var month = d.getMonth() + 1;
+
+  var str_month = '';
+
+  var str_hour = '';
+
+  if(month < 10)
+  str_month = '0' + month;
+
+  var hours = d.getHours()-4;
+
+  if(hours < 10)
+  str_hour = '0'+hours;
+  else
+  str_hour = hours;
+
+  if(minutes >= 60)
+  {
+    minutes = minutes-60;
+    hours = hours+1;
+    if(hours < 10)
+    str_hour = '0'+hours;
+    else
+    str_hour = hours;
+  }
+
+  if(hours >=24 || (hours+1)>=24 )
+  str_hour = '00';
+
+ var str_minutes = '';
+
+  if(minutes < 10)
+  str_minutes = '0'+minutes;
+  else
+  str_minutes = minutes;
+
+  var dtime = str_hour+':'+str_minutes;
+
+  hours = d.getHours()-4;
+  if(hours < 10)
+  str_hour = '0'+hours;
+  else
+  str_hour = hours;
+
+  minutes = d.getMinutes();
+
+  if(minutes < 10)
+  str_minutes = '0'+minutes;
+  else
+  str_minutes = minutes;
+
+
+  var dtime1 = str_hour+':'+str_minutes;
+
+  var ddate ='';
+
+  if(month >= 10)
+  ddate = d.getFullYear()+'-'+month+'-'+d.getDate();
+  else
+  ddate = d.getFullYear()+'-'+str_month+'-'+d.getDate();
+
+  console.log(dtime);
+  console.log("\n");
+  console.log(ddate);
+  console.log("\n");
+  console.log(dtime1);*/
+
+  var str_month = '';
+
+  var month = d.getMonth() + 1;
+
+  if(month < 10)
+  str_month = '0' + month;
+  else
+  str_month = month;
+
+  var year = d.getFullYear();
+
+  var day = d.getDate();
+
+  var dt = year + '-' + str_month + '-' + day;
+
+  var params = {
+    ExpressionAttributeValues: {
+     ":v1": {
+       S: dt
+     }
+    },
+   FilterExpression: '(startDate < :v1  and endDate >= :v1) or startDate = :v1',
+   TableName: "AthenaEvent"
+  };
+
+
+              var array_email =[];
+
+                          dynamodb.scan(params, function(err, data) {
+                            if (err) console.log(err, err.stack); // an error occurred
+                            else    {
+                                       console.log(data);
+                                       console.log('hello you');
+
+
+                                       var obj = data.Items;
+
+                                       console.log(obj);
+
+                                       for(var key in obj){
+
+                                        if(!array_email.includes(obj[key].username.S))
+                     								    array_email.push(obj[key].username.S);
+                     								  }
+
+                                      console.log(array_email.length);
+                                      console.log('\n');
+
+                                      for(var i=0;i < array_email.length; i++) {
+                                        var strng2 = 'Events that are already happening underway'+ '\n';
+                                        var strng1 = 'Here are the events scheduled to happen today ' +'\n';
+                                        var strng = '';
+
+                                          for(var val in obj){
+
+                                              console.log(array_email[i]);
+
+                                              var d1 = Date.parse(obj[val].startDate.S);
+                                              var d2 = Date.parse(obj[val].endDate.S);
+                                              var d3 = Date.parse(dt);
+
+
+                                             if(array_email[i] == obj[val].username.S)
+                                             {
+
+
+                                               if(d1 < d3 && d2 >= d3)
+                                               {
+                                                strng = 'summary: ' +obj[val].summary.S +' ' + '\n';
+                                                strng = strng + 'starts at: ' + obj[val].startTime.S +' ' + '\n';
+                                                strng = strng + 'ends at: ' + obj[val].endTime.S  +' ' + '\n';
+                                                strng = strng + '--------------------------------------------------------' + '\n';
+                                                strng2 = strng2 + strng;
+                                               }
+
+                                               else if( d1 == d3 && d2 >= d3)
+                                               {
+                                                 strng = 'summary: ' +obj[val].summary.S +' ' + '\n';
+                                                 strng = strng + 'starts at: ' + obj[val].startTime.S +' ' + '\n';
+                                                 strng = strng + 'ends at: ' + obj[val].endTime.S  +' ' + '\n';
+                                                 strng = strng + '--------------------------------------------------------' + '\n';
+                                                 strng1 = strng1 + strng;
+                                               }
+
+                                          }
+
+                                                console.log("the message is ");
+
+                                                console.log(strng2 + strng1);
+
+                                                var strng4 = strng2 + strng1;
+
+                                                 var params10 = {
+                                                   Destination: { /* required */
+                                                     ToAddresses: [
+                                                       array_email[i]
+                                                       /* more items */
+                                                     ]
+                                                   },
+                                                   Message: { /* required */
+                                                     Body: { /* required */
+                                                      Text: {
+                                                         Data: strng4, /* required */
+                                                        Charset: 'UTF-8'
+                                                       }
+                                                     },
+                                                     Subject: { /* required */
+                                                       Data: 'itinerary', /* required */
+                                                       Charset: 'UTF-8'
+                                                     }
+                                                   },
+                                                   Source: 'str306@nyu.edu' /* required */
+                                                 //  ReturnPath: "",
+                                                   //ReturnPathArn: "",
+                                                   //SourceArn: ""
+                                                 };
+                                                 ses.sendEmail(params10, function(err, data) {
+                                                   if (err) console.log(err, err.stack); // an error occurred
+                                                   else     {
+                                                             console.log(data);           // successful response
+                                                           }
+
+
+                                                 });
+
+                                      }
+                     								}
+                                }
+                            });
+
+   } catch (err) {
+                    //callback(err);
+      }
+
+};
+
+
+  // Use this code if you don't use the http event with the LAMBDA-PROXY integration
+  // callback(null, { message: 'Go Serverless v1.0! Your function executed successfully!', event });

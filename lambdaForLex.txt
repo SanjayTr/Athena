@@ -1,0 +1,1070 @@
+from __future__ import print_function
+import math
+import dateutil.parser
+import datetime
+from datetime import datetime
+import time
+import os
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+import json
+import decimal
+#import wikipedia
+#import wikiIntent
+
+
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, decimal.Decimal):
+            return str(o)
+        return super(DecimalEncoder, self).default(o)
+
+date = datetime.now()
+date = date.strftime('%Y/%b/%d/%H/%M/%S/%f')
+# print(type(date))
+print(date)
+
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('SingPrim')
+table2 = dynamodb.Table('AthenaEvent')
+uniId=datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+
+""" --- Helpers to build responses which match the structure of the necessary dialog actions --- """
+
+
+def get_slots(intent_request):
+    return intent_request['currentIntent']['slots']
+
+
+def elicit_slot(session_attributes, intent_name, slots, slot_to_elicit, message):
+    return {
+        'sessionAttributes': session_attributes,
+        'dialogAction': {
+            'type': 'ElicitSlot',
+            'intentName': intent_name,
+            'slots': slots,
+            'slotToElicit': slot_to_elicit,
+            'message': message
+        }
+    }
+
+
+def close(session_attributes, fulfillment_state, message):
+    response = {
+        'sessionAttributes': session_attributes,
+        'dialogAction': {
+            'type': 'Close',
+            'fulfillmentState': fulfillment_state,
+            'message': message
+        }
+    }
+
+    return response
+
+
+def delegate(session_attributes, slots):
+    return {
+        'sessionAttributes': session_attributes,
+        'dialogAction': {
+            'type': 'Delegate',
+            'slots': slots
+        }
+    }
+
+'''def addeventfunc(intent_request):
+        return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Hi there how may I help you in add event intent' })
+'''
+#-------------------------------------------------------------------------------------
+
+def parse_int(n):
+    try:
+        return int(n)
+    except ValueError:
+        return float('nan')
+
+
+def build_validation_result(is_valid, violated_slot, message_content):
+    if message_content is None:
+        return {
+            "isValid": is_valid,
+            "violatedSlot": violated_slot,
+        }
+
+    return {
+        'isValid': is_valid,
+        'violatedSlot': violated_slot,
+        'message': {'contentType': 'PlainText', 'content': message_content}
+    }
+
+
+def isvalid_date(date):
+    try:
+        dateutil.parser.parse(date)
+        return True
+    except ValueError:
+        return False
+                  
+
+#--------------VALIDATION FUNCTIONS-----------------------------------------------------------------------------------------------
+def validate_addevent(stime,sdate,etime,edate):
+    if stime is not None:
+        if not isvalid_date(stime):
+            return build_validation_result(False,'Time', 'Kindly enter time in valid format. Eg: 2 pm')
+    if sdate is not None:
+        if not isvalid_date(sdate):
+            return build_validation_result(False,'Time', 'Kindly enter date in valid format. Eg: 2 pm')
+    if etime is not None:
+        if not isvalid_date(etime):
+            return build_validation_result(False,'Time', 'Kindly enter date in valid format. Eg: 2 pm')
+    if edate is not None:
+        if not isvalid_date(edate):
+            return build_validation_result(False,'Time', 'Kindly enter date in valid format. Eg: 2 pm')
+    
+
+    if edate is not None and sdate is not None:
+        if edate<sdate:
+            return build_validation_result(False,'EndDate', 'Kindly enter an end date later or same day as start date.')
+    if edate is not None and sdate is not None and etime is not None and stime is not None:
+        if edate == sdate:
+            if etime <= stime:
+                return build_validation_result(False,'EndTime', 'Kindly enter a time later than start time.')
+    return build_validation_result(True,None,None)
+    
+def validate_addtask(priority,deadline):
+    priority_type=['low','medium','high']
+    if priority is not None and priority.lower() not in priority_type:
+        return build_validation_result(False,
+                                        'Priority',
+                                        'We do not support {} priority. Please select from [low, medium, high].'.format(priority))
+    if deadline is not None:
+        #today=datetime.date.today()
+        today=datetime.date(datetime.now()).today()
+        s=""
+        s=str(today)
+        if deadline<s:
+            return build_validation_result(False,'Deadline', 'Kindly enter a deadline no earlier than today.')
+    
+    return build_validation_result(True,None,None)
+    
+#-----------------------Small talk Intent specific functions----------------------------------------------------------------------------------
+
+def greetfunc(intent_request):
+        return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Hi there how may I help you' })
+
+def salutfunc(intent_request):
+    return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Bye! Hope to see you again real soon.' })
+
+#-----------------------EVENT Intent specific functions----------------------------------------------------------------------------------
+
+def addeventfunc(intent_request):
+    summary=get_slots(intent_request)["Summary"]
+    stime=get_slots(intent_request)["StartTime"]
+    sdate=get_slots(intent_request)["StartDate"]
+    etime=get_slots(intent_request)["EndTime"]
+    edate=get_slots(intent_request)["EndDate"]
+    email=get_slots(intent_request)["email"]
+    flagg=0
+    
+    source=intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        
+        slots=get_slots(intent_request)
+        
+        validation_result = validate_addevent(stime,sdate,etime,edate)
+        if not validation_result['isValid']:
+            slots[validation_result['violatedSlot']] = None
+            return elicit_slot(intent_request['sessionAttributes'],
+                               intent_request['currentIntent']['name'],
+                               slots,
+                               validation_result['violatedSlot'],
+                               validation_result['message'])
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    if(summary is not None and stime is not None and sdate is not None and etime is not None and edate is not None and email is not None):
+        flagg=1
+        print("unique ID is, ",uniId)
+        table2.put_item(
+    	Item = {
+    		'id': uniId,
+    		'username': email,
+    		'summary':summary,
+    		'startDate':sdate,
+    		'startTime':stime,
+    		'endDate':edate,
+    		'endTime':etime
+    	}
+    )
+        
+        
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+        
+    
+    return close(intent_request['sessionAttributes'],
+                'Fulfilled',
+                {'contentType': 'PlainText',
+                'content':'Thanks, the event \"{}\" has been added to your calendar'.format(summary)})
+                
+                
+def listeventsfunc(intent_request):
+    # fe = Attr('username').eq('str306');
+    # ean = { "#un": "username" }
+    # esk = None
+    
+    
+    # response = table.scan(
+    #     FilterExpression=fe
+    #     )
+    flagg=0
+    email=get_slots(intent_request)["email"]
+    
+    # if email is not None:
+    #     flagg=1
+    
+    #if flag==1:
+    fe = Attr('username').eq(email);
+    pe ="id,endDate,endTime,startDate,startTime,summary,username";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table2.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    for i in response['Items']:
+        if 'summary' not in i:          #skip tasks
+            continue
+        #x.append(json.dumps(i, cls=DecimalEncoder))
+        #x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr1=temparr[1].split(":")      #contains summary of event
+        
+        temparr2=temparr[3].split(":")      #contains end date
+        temparr3=temparr[2].split(":")      #contains end time
+        
+        stripstring=temparr1[1].strip(' ')  #summary
+        stripstring=stripstring.strip('\"')
+        
+        stripstring2=temparr2[1].strip(' ')  #end date
+        stripstring2=stripstring2.strip('\"')
+        
+        stripstring3=temparr3[1].strip(' ')  #end time hour
+        stripstring3=stripstring3.strip('\"')
+        
+        stripstring4=temparr3[2].strip(' ')  #end time minute
+        stripstring4=stripstring4.strip('\"')
+        
+        skyfall=stripstring2+' '+stripstring3+':'+stripstring4
+        sf=datetime.strptime(skyfall,'%Y-%m-%d %H:%M')
+        curr=datetime.now()
+        if curr>sf:
+            continue
+        
+        x.append(stripstring)
+        #x.append(i)
+        
+    if not x:
+        str1="there are no events for you."
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'Sorry! {}'.format(str1)})
+    else:
+        str1=' , '.join(str(e) for e in x)
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'The events currently active are : {}'.format(str1)})
+
+def listcompletedeventfunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    flagg=0
+    #email=get_slots(intent_request)["email"]
+    
+    # if email is not None:
+    #     flagg=1
+    
+    #if flag==1:
+    fe = Attr('username').eq(email);
+    pe ="id,endDate,endTime,startDate,startTime,summary,username";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table2.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    for i in response['Items']:
+        if 'summary' not in i:          #skip tasks
+            continue
+        #x.append(json.dumps(i, cls=DecimalEncoder))
+        #x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr1=temparr[1].split(":")      #contains summary of event
+        
+        temparr2=temparr[3].split(":")      #contains end date
+        temparr3=temparr[2].split(":")      #contains end time
+        
+        stripstring=temparr1[1].strip(' ')  #summary
+        stripstring=stripstring.strip('\"')
+        
+        stripstring2=temparr2[1].strip(' ')  #end date
+        stripstring2=stripstring2.strip('\"')
+        
+        stripstring3=temparr3[1].strip(' ')  #end time hour
+        stripstring3=stripstring3.strip('\"')
+        
+        stripstring4=temparr3[2].strip(' ')  #end time minute
+        stripstring4=stripstring4.strip('\"')
+        
+        skyfall=stripstring2+' '+stripstring3+':'+stripstring4
+        sf=datetime.strptime(skyfall,'%Y-%m-%d %H:%M')
+        curr=datetime.now()
+        if curr<sf:
+            continue
+        
+        x.append(stripstring)
+        #x.append(i)
+        
+    if not x:
+        str1="you have not completed any events recently."
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'Sorry! {}'.format(str1)})
+    else:
+        str1=' , '.join(str(e) for e in x)
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'The events recently concluded are : {}'.format(str1)})    
+
+def deleteeventfunc(intent_request):
+    fname=get_slots(intent_request)["EventName"]
+    email=get_slots(intent_request)["email"]
+    flagg=0
+    
+    source = intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        slots = get_slots(intent_request)
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    if(fname is not None and email is not None):
+        flagg=1
+        fe = Attr('username').eq(email);
+        pe = "id,endDate,endTime,startDate,startTime,summary,username";
+        ean = { "#un": "username" }
+        esk = None
+        
+        response = table2.scan(
+            FilterExpression=fe,
+            ProjectionExpression = pe
+            )
+        
+        x=[]
+        idd=""
+        for i in response['Items']:     #to skip events and include only tasks
+            if 'summary' not in i:
+                continue
+        
+            temp=json.dumps(i)
+            temparr=temp.split(",")
+            temparr2=temparr[1].split(":")    #event name
+            temparr3=temparr[6].split(":")    #id of the task we are searching for
+            stripstring=temparr2[1].strip(' ')
+            stripstring=stripstring.strip('}"')
+            stripstring=stripstring.strip('\"')
+            #print(temparr3[1],':',stripstring)
+            #print(temparr2[1])
+        
+        
+        
+            #temparr3=temparr[1].split(":")
+            #stripstring=temparr3[1].strip(' ')
+            #stripstring=stripstring.strip('\"')
+            var=fname
+        
+            if stripstring == var:          #if eventName is equal to user entered eventName
+                stripstring2=temparr3[1].strip(' ')
+                stripstring2=stripstring2.strip('}')
+                stripstring2=stripstring2.strip('\"')
+                idd=stripstring2
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('}')
+            stripstring2=stripstring2.strip('\"')
+            x.append(i)
+    
+        str1 = '\n'.join(str(e) for e in x)
+        # print("i am here outside")
+        # print('idd ',idd)
+        # print('stripstring ',stripstring)
+        # print('var ',var)
+        print(x)
+        if idd:
+            print("i am here")
+            print(idd)
+            table2.delete_item(
+	            Key = {
+		          'id': idd
+	            })
+        else:
+	        return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'The event \'{}\' is not present in your calendar. Please say \" List Events \" to know which events you currently have'.format(fname) })
+        
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+    
+    return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Deleting the event {} and waiting on dynamo db'.format(fname) })
+
+#-----------------------TASK Intent specific functions----------------------------------------------------------------------------------
+          
+def addtaskfunc(intent_request):
+    name=get_slots(intent_request)["Name"]
+    description=get_slots(intent_request)["Description"]
+    priority=get_slots(intent_request)["Priority"]
+    deadline=get_slots(intent_request)["Deadline"]
+    completed=False
+    email=get_slots(intent_request)["email"]
+    flagg=0
+    
+    source = intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        slots = get_slots(intent_request)
+        
+        validation_result = validate_addtask(priority,deadline)
+        if not validation_result['isValid']:
+            slots[validation_result['violatedSlot']] = None
+            return elicit_slot(intent_request['sessionAttributes'],
+                               intent_request['currentIntent']['name'],
+                               slots,
+                               validation_result['violatedSlot'],
+                               validation_result['message'])
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    #here to add task
+    if(name is not None and description is not None and priority is not None and deadline is not None and email is not None):
+        flagg=1
+        table.put_item(
+        	Item = {
+        		'username': email,
+        		'types': 'task',
+        		'id': date,
+        		'description': description,
+        		'priority': priority,
+        		'deadline': deadline,
+        		'taskName': name,
+        		'completed': completed
+        	}
+        )
+        
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+        
+    return close(intent_request['sessionAttributes'],
+                'Fulfilled',
+                {'contentType': 'PlainText',
+                'content':'Thanks, \' {} \' has been added to your list of tasks'.format(name)})
+                
+def listtasksfunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    
+    #if email is not None:
+    
+    fe = Attr('username').eq(email);
+    pe = "taskName, description, deadline,completed";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        x.append(json.dumps(i, cls=DecimalEncoder))
+        x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr2=temparr[3].split(":")  #contains taskname
+        temparr1=temparr[0].split(":")  #contains flag
+        #print(temparr2[1],'\n')            
+        #x.append(temparr2[1])
+        
+        stripstring=temparr1[1].strip(' ')
+        stripstring=stripstring.strip('\'')
+        print(stripstring)
+        if stripstring == 'false':
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('\}')
+            stripstring2=stripstring2.strip('\"')
+            x.append(stripstring2)
+            
+    #str1 = '\n'.join(str(e) for e in x)
+    if not x:
+        str1="There are no incomplete tasks for you. You may add new tasks by saying \" add tasks \" "
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'Sorry! {}'.format(str1) })
+    else:
+        str1=' , '.join(str(e) for e in x)
+    
+    return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'The tasks currently active for you are: {}'.format(str1) })
+          
+def listcompletedtasksfunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    
+    #if email is not None:
+    
+    fe = Attr('username').eq(email);
+    pe = "taskName, description, deadline,completed";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        x.append(json.dumps(i, cls=DecimalEncoder))
+        x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr2=temparr[3].split(":")  #contains taskname
+        temparr1=temparr[0].split(":")  #contains flag
+        #print(temparr2[1],'\n')            
+        #x.append(temparr2[1])
+        
+        stripstring=temparr1[1].strip(' ')
+        stripstring=stripstring.strip('\'')
+        print(stripstring)
+        if stripstring == 'true':
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('\}')
+            stripstring2=stripstring2.strip('\"')
+            x.append(stripstring2)
+            
+    #str1 = '\n'.join(str(e) for e in x)
+    if not x:
+        str1="There are no incomplete tasks for you. You may add new tasks by saying \" add tasks \" "
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'Sorry! {}'.format(str1) })
+    else:
+        str1=' , '.join(str(e) for e in x)
+    
+    return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'You recently completed the tasks : {}'.format(str1) })
+          
+def listimportanttasksfunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    
+    #if email is not None:
+        
+    fe = Attr('username').eq(email);
+    pe = "taskName,description,deadline,priority,completed";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        x.append(json.dumps(i, cls=DecimalEncoder))
+        x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr2=temparr[4].split(":")  #contains task name
+        temparr3=temparr[2].split(":")  #contains priority level
+        temparr1=temparr[0].split(":")   #contains completed flag value
+        
+        stripstring=temparr3[1].strip(' ')  #priority
+        stripstring=stripstring.strip('\"')
+        
+        stripstring2=temparr1[1].strip(' ') #flag
+        stripstring2=stripstring2.strip('\"')
+        
+        stripstring3=temparr2[1].strip(' ') #flag
+        stripstring3=stripstring3.strip('}')
+        stripstring3=stripstring3.strip('\"')
+        
+        var="high"
+        if stripstring != var:
+            continue
+        if stripstring2 == 'true':
+            continue
+        #print(temparr2[1])
+        stripstring2=temparr2[1].strip(' ')
+        stripstring2=stripstring2.strip('\"')
+        x.append(stripstring3)
+    #str1 = '\n       '.join(str(e) for e in x)
+    #str1=' , '.join(str(e) for e in x)
+    if not x:
+        str1="You do not have any important tasks. To add an important task, say \" add task \" and set the priority to \" high \" "
+        return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'Sorry! {}'.format(str1) })
+    else:
+        str1=' , '.join(str(e) for e in x)
+    return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': 'The important tasks currently active for you are: {}'.format(str1) })
+                  
+def deletetaskfunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    tname=get_slots(intent_request)["TaskName"]
+    flagg=0
+    
+    source = intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        slots = get_slots(intent_request)
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    if(tname is not None and email is not None):
+        flagg=1
+        
+        fe = Attr('username').eq(email);
+        pe = "taskName,description,deadline,priority,id";
+        ean = { "#un": "username" }
+        esk = None
+        
+        response = table.scan(
+            FilterExpression=fe,
+            ProjectionExpression = pe
+            )
+        
+        x=[]
+        idd=""
+        for i in response['Items']:     #to skip events and include only tasks
+            if 'taskName' not in i:
+                continue
+        
+            temp=json.dumps(i)
+            temparr=temp.split(",")
+            temparr2=temparr[4].split(":")    #task name
+            temparr3=temparr[3].split(":")    #id of the task we are searching for
+            stripstring=temparr2[1].strip(' ')
+            stripstring=stripstring.strip('}"')
+            stripstring=stripstring.strip('\"')
+            #print(temparr3[1],':',stripstring)
+            #print(temparr2[1])
+        
+        
+        
+            #temparr3=temparr[1].split(":")
+            #stripstring=temparr3[1].strip(' ')
+            #stripstring=stripstring.strip('\"')
+            var=tname
+        
+            if stripstring == var:          #if taskname is equal to user entered taskname
+                stripstring2=temparr3[1].strip(' ')
+                stripstring2=stripstring2.strip('\"')
+                idd=stripstring2
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('\"')
+            x.append(i)
+    
+        str1 = '\n'.join(str(e) for e in x)
+        # print("i am here outside")
+        # print('idd ',idd)
+        # print('stripstring ',stripstring)
+        # print('var ',var)
+        print(x)
+        if idd:
+            print("i am here")
+            table.delete_item(
+	            Key = {
+		          'id': idd
+	            })
+        else:
+	        return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'The task \'{}\' is not present in your calendar. Please say \" List Task \" to know which tasks you currently have'.format(tname) })
+    	    
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+    
+    return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Deleting the task {} from your calendar'.format(tname) })
+                  
+def marktaskcompletefunc(intent_request):
+    tname=get_slots(intent_request)["TaskName"]
+    email=get_slots(intent_request)["email"]
+    flagg=0
+    
+    source = intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        slots = get_slots(intent_request)
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    if(tname is not None and email is not None):
+        flagg=1
+        
+        fe = Attr('username').eq(email);
+        pe = "taskName,description,deadline,priority,id";
+        ean = { "#un": "username" }
+        esk = None
+        
+        response = table.scan(
+            FilterExpression=fe,
+            ProjectionExpression = pe
+            )
+        
+        x=[]
+        idd=""
+        for i in response['Items']:     #to skip events and include only tasks
+            if 'taskName' not in i:
+                continue
+        
+            temp=json.dumps(i)
+            temparr=temp.split(",")
+            temparr2=temparr[4].split(":")    #task name
+            temparr3=temparr[3].split(":")    #id of the task we are searching for
+            stripstring=temparr2[1].strip(' ')
+            stripstring=stripstring.strip('}"')
+            stripstring=stripstring.strip('\"')
+            #print(temparr3[1],':',stripstring)
+            #print(temparr2[1])
+        
+        
+        
+            #temparr3=temparr[1].split(":")
+            #stripstring=temparr3[1].strip(' ')
+            #stripstring=stripstring.strip('\"')
+            var=tname
+        
+            if stripstring == var:          #if taskname is equal to user entered taskname
+                stripstring2=temparr3[1].strip(' ')
+                stripstring2=stripstring2.strip('\"')
+                idd=stripstring2
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('\"')
+            x.append(i)
+    
+        str1 = '\n'.join(str(e) for e in x)
+        # print("i am here outside")
+        # print('idd ',idd)
+        # print('stripstring ',stripstring)
+        # print('var ',var)
+        print(x)
+        if idd:
+            print("i am here")
+            table.update_item(
+	            Key = {
+		          'id': idd
+	            },
+    	    UpdateExpression = 'SET completed = :value1',
+	        ExpressionAttributeValues = {
+		        ':value1': True
+	            })
+        
+        
+        
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+        
+    
+    
+    return close(intent_request['sessionAttributes'],
+                 'Fulfilled',
+                 {'contentType': 'PlainText',
+                  'content': 'Marking the task \' {} \' as completed'.format(tname) })
+                  
+#-----------------------Create Schedule Intent specific functions----------------------------------------------------------------------------------
+                  
+def createschedulefunc(intent_request):
+    email=get_slots(intent_request)["email"]
+    fe = Attr('username').eq(email);
+    pe ="id,endDate,endTime,startDate,startTime,summary,username";
+    ean = { "#un": "username" }
+    esk = None
+    
+    #the event part
+    response = table2.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    x=[]
+    y=[]
+    for i in response['Items']:
+        if 'summary' not in i:          #skip tasks
+            continue
+        #x.append(json.dumps(i, cls=DecimalEncoder))
+        #x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr1=temparr[1].split(":")      #contains summary of event
+        
+        temparr2=temparr[3].split(":")      #contains end date
+        temparr3=temparr[2].split(":")      #contains end time
+        
+        temparr4=temparr[4].split(":")      #contains start date
+        temparr5=temparr[0].split(":")      #contains start time
+        
+        stripstring=temparr1[1].strip(' ')  #summary
+        stripstring=stripstring.strip('\"')
+        
+        stripstring2=temparr2[1].strip(' ')  #end date
+        stripstring2=stripstring2.strip('\"')
+        
+        stripstring3=temparr3[1].strip(' ')  #end time hour
+        stripstring3=stripstring3.strip('\"')
+        
+        stripstring4=temparr3[2].strip(' ')  #end time minute
+        stripstring4=stripstring4.strip('\"')
+        
+        stripstring5=temparr4[1].strip(' ') #start date
+        stripstring5=stripstring5.strip('\"')
+        
+        stripstring6=temparr5[1].strip(' ') #start time hour
+        stripstring6=stripstring6.strip('\"')
+        
+        stripstring7=temparr5[2].strip(' ') #start time minutes
+        stripstring7=stripstring7.strip('\"')
+        
+        skyfall=stripstring2+' '+stripstring3+':'+stripstring4
+        dawn=stripstring5+' '+stripstring6+':'+stripstring7
+        sf=datetime.strptime(skyfall,'%Y-%m-%d %H:%M')
+        dw=datetime.strptime(dawn,'%Y-%m-%d %H:%M')
+        
+        curr=datetime.now()
+        
+        if curr>sf:
+            continue
+        if curr>dw and curr<sf:
+            y.append(stripstring)
+        if curr.date()==dw.date():
+            x.append(stripstring)
+    str1=""
+    str2=""
+    if not y:
+        str1='you do not have any events in progress.'
+    else:
+        str1='your events in progress are: '
+        str1=str1+' , '.join(str(e) for e in y)
+    if not x:
+        str2="you do not have any events starting today."
+    else:
+        str2='the events starting today are: '
+        str2=str2+' , '.join(str(e) for e in x)
+    str3=str1+' '+str2
+    
+    #the task part
+    fe = Attr('username').eq(email);
+    pe = "taskName, description, deadline,completed";
+    ean = { "#un": "username" }
+    esk = None
+    
+    
+    response = table.scan(
+        FilterExpression=fe,
+        ProjectionExpression = pe
+        )
+    
+    x=[]
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        x.append(json.dumps(i, cls=DecimalEncoder))
+        x.append(print("\n"))
+        #print(json.dumps(i, cls=DecimalEncoder))
+    '''
+    for i in response['Items']:
+        if 'taskName' not in i:
+            continue
+        temp=json.dumps(i)
+        temparr=temp.split(",")
+        temparr2=temparr[3].split(":")  #contains taskname
+        temparr1=temparr[0].split(":")  #contains flag
+        #print(temparr2[1],'\n')            
+        #x.append(temparr2[1])
+        
+        stripstring=temparr1[1].strip(' ')
+        stripstring=stripstring.strip('\'')
+        #print(stripstring)
+        #print("i am out in task")
+        if stripstring == 'false':                  #include only incomplete tasks
+            stripstring2=temparr2[1].strip(' ')
+            stripstring2=stripstring2.strip('\}')
+            stripstring2=stripstring2.strip('\"')
+            #print("i am  in task")
+            temparr3=temparr[1].split(":")
+            stripstring3=temparr3[1].strip(' ')
+            stripstring3=stripstring3.strip('\'')
+            #print("dynamo date ",stripstring3)
+            curIdnew=datetime.now().strftime("%Y-%m-%d")
+            #print("cur date ",curIdnew)
+            stripstring3=stripstring3.strip('\"')
+            if stripstring3==datetime.now().strftime("%Y-%m-%d"):
+                #print("i am fully in")
+                x.append(stripstring2)
+    str4=""
+    if not x:
+        str4="you do not have any task deadlines today."
+    else:
+        str4='the tasks with deadline today are: '
+        str4=str4+' , '.join(str(e) for e in x)
+    str3=str3+' '+str4
+    
+    return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': '{}'.format(str3) })
+          
+def wikiintentfunc(intent_request):
+    inputt=get_slots(intent_request)["inputt"]
+    flagg=0
+    
+    source = intent_request['invocationSource']
+    
+    if source == 'DialogCodeHook':
+        slots = get_slots(intent_request)
+    
+    output_session_attributes = intent_request['sessionAttributes'] if intent_request['sessionAttributes'] is not None else {}
+    
+    if(inputt is not None):
+        flagg=1
+        #varr=wikipedia.summary(inputt,sentences=5)
+        varr=wikiIntent.summary(inputt,sentences=5)
+    
+    if(flagg==0):
+        return delegate(output_session_attributes,get_slots(intent_request))
+    
+    return close(intent_request['sessionAttributes'],
+         'Fulfilled',
+         {'contentType': 'PlainText',
+          'content': '{}'.format(varr) })
+    
+#-----------------------Logistics functions----------------------------------------------------------------------------------
+def dispatch(intent_request):
+    """
+    Called when the user specifies an intent for this bot.
+    """
+
+    #logger.debug('dispatch userId={}, intentName={}'.format(intent_request['userId'], intent_request['currentIntent']['name']))
+
+    intent_name = intent_request['currentIntent']['name']
+
+    # Dispatch to your bot's intent handlers
+    if intent_name == 'Greeting':
+        return greetfunc(intent_request)
+    
+    if intent_name == 'addEvent':
+        return addeventfunc(intent_request)
+    if intent_name == 'listEvents':
+        return listeventsfunc(intent_request)
+    if intent_name == 'lce':
+        return listcompletedeventfunc(intent_request)
+    if intent_name == 'deleteEvent':
+        return deleteeventfunc(intent_request)
+        
+    if intent_name == 'addTask':
+        return addtaskfunc(intent_request)
+    if intent_name == 'listTasks':
+        return listtasksfunc(intent_request)
+    if intent_name == 'listImportantTasks':
+        return listimportanttasksfunc(intent_request)
+    if intent_name == 'listCompletedTasks':
+        return listcompletedtasksfunc(intent_request)
+    if intent_name == 'deleteTask':
+        return deletetaskfunc(intent_request)
+    if intent_name == 'markTaskComplete':
+        return marktaskcompletefunc(intent_request)
+        
+    if intent_name == 'createSchedule':
+        return createschedulefunc(intent_request)
+    if intent_name == 'wikiIntent':
+        return wikiintentfunc(intent_request)
+        
+    if intent_name == 'ThankYou':
+        return salutfunc(intent_request)
+        
+    raise Exception('Intent with name ' + intent_name + ' not supported')
+
+def lambda_handler(event, context):
+    # TODO implement
+    os.environ['TZ'] = 'America/New_York'
+    time.tzset()
+    return dispatch(event)
